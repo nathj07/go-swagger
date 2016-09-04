@@ -15,8 +15,8 @@
 package generator
 
 import (
-	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -33,15 +33,18 @@ import (
 // GenerateServerOperation generates a parameter model, parameter validator, http handler implementations for a given operation
 // It also generates an operation handler interface that uses the parameter model for handling a valid request.
 // Allows for specifying a list of tags to include only certain tags for the generation
-func GenerateServerOperation(operationNames, tags []string, includeHandler, includeParameters, includeResponses bool, opts GenOpts) error {
-
+func GenerateServerOperation(operationNames, tags []string, opts *GenOpts) error {
+	if opts == nil {
+		return errors.New("gen opts are required")
+	}
+	if err := opts.EnsureDefaults(false); err != nil {
+		return err
+	}
 	if opts.TemplateDir != "" {
 		if err := templates.LoadDir(opts.TemplateDir); err != nil {
 			return err
 		}
 	}
-
-	compileTemplates()
 
 	// Load the spec
 	_, specDoc, err := loadSpec(opts.Spec)
@@ -67,15 +70,15 @@ func GenerateServerOperation(operationNames, tags []string, includeHandler, incl
 			defaultConsumes = runtime.JSONMime
 		}
 
-		apiPackage := mangleName(swag.ToFileName(opts.APIPackage), "api")
-		serverPackage := mangleName(swag.ToFileName(opts.ServerPackage), "server")
+		apiPackage := opts.LanguageOpts.MangleName(swag.ToFileName(opts.APIPackage), "api")
+		serverPackage := opts.LanguageOpts.MangleName(swag.ToFileName(opts.ServerPackage), "server")
 		generator := operationGenerator{
 			Name:                 operationName,
 			Method:               method,
 			Path:                 path,
 			APIPackage:           apiPackage,
-			ModelsPackage:        mangleName(swag.ToFileName(opts.ModelPackage), "definitions"),
-			ClientPackage:        mangleName(swag.ToFileName(opts.ClientPackage), "client"),
+			ModelsPackage:        opts.LanguageOpts.MangleName(swag.ToFileName(opts.ModelPackage), "definitions"),
+			ClientPackage:        opts.LanguageOpts.MangleName(swag.ToFileName(opts.ClientPackage), "client"),
 			ServerPackage:        serverPackage,
 			Operation:            *operation,
 			SecurityRequirements: analyzed.SecurityRequirementsFor(operation),
@@ -83,15 +86,12 @@ func GenerateServerOperation(operationNames, tags []string, includeHandler, incl
 			Target:               filepath.Join(opts.Target, serverPackage),
 			Base:                 opts.Target,
 			Tags:                 tags,
-			IncludeHandler:       includeHandler,
-			IncludeParameters:    includeParameters,
-			IncludeResponses:     includeResponses,
-			DumpData:             opts.DumpData,
 			DefaultScheme:        defaultScheme,
 			DefaultProduces:      defaultProduces,
 			DefaultConsumes:      defaultConsumes,
 			Doc:                  specDoc,
 			Analyzed:             analyzed,
+			GenOpts:              opts,
 		}
 		if err := generator.Generate(); err != nil {
 			return err
@@ -118,16 +118,13 @@ type operationGenerator struct {
 	data                 interface{}
 	pkg                  string
 	cname                string
-	IncludeHandler       bool
-	IncludeParameters    bool
-	IncludeResponses     bool
-	DumpData             bool
 	DefaultScheme        string
 	DefaultProduces      string
 	DefaultConsumes      string
 	Doc                  *loads.Document
 	Analyzed             *analysis.Spec
 	WithContext          bool
+	GenOpts              *GenOpts
 }
 
 func (o *operationGenerator) Generate() error {
@@ -153,11 +150,12 @@ func (o *operationGenerator) Generate() error {
 	bldr.DefaultImports = []string{filepath.ToSlash(filepath.Join(baseImport(o.Base), o.ModelsPackage))}
 	bldr.RootAPIPackage = o.APIPackage
 	bldr.WithContext = o.WithContext
+	bldr.GenOpts = o.GenOpts
 	bldr.DefaultConsumes = o.DefaultConsumes
 
 	for _, tag := range o.Operation.Tags {
 		if len(o.Tags) == 0 {
-			bldr.APIPackage = mangleName(swag.ToFileName(tag), o.APIPackage)
+			bldr.APIPackage = o.GenOpts.LanguageOpts.MangleName(swag.ToFileName(tag), o.APIPackage)
 			op, err := bldr.MakeOperation()
 			if err != nil {
 				return err
@@ -167,7 +165,7 @@ func (o *operationGenerator) Generate() error {
 		}
 		for _, ft := range o.Tags {
 			if ft == tag {
-				bldr.APIPackage = mangleName(swag.ToFileName(tag), o.APIPackage)
+				bldr.APIPackage = o.GenOpts.LanguageOpts.MangleName(swag.ToFileName(tag), o.APIPackage)
 				op, err := bldr.MakeOperation()
 				if err != nil {
 					return err
@@ -188,117 +186,119 @@ func (o *operationGenerator) Generate() error {
 	sort.Sort(operations)
 
 	for _, op := range operations {
-		if o.DumpData {
+		if o.GenOpts.DumpData {
 			bb, _ := json.MarshalIndent(swag.ToDynamicJSON(op), "", " ")
 			fmt.Fprintln(os.Stdout, string(bb))
 			continue
 		}
-		og := new(opGen)
-		og.IncludeHandler = o.IncludeHandler
-		og.IncludeParameters = o.IncludeParameters
-		og.IncludeResponses = o.IncludeResponses
-		og.data = &op
-		og.pkg = op.Package
-		og.cname = swag.ToGoName(op.Name)
-		og.Doc = o.Doc
-		og.Analyzed = o.Analyzed
-		og.Target = o.Target
-		og.APIPackage = o.APIPackage
-		og.WithContext = o.WithContext
-		return og.Generate()
+		return o.GenOpts.renderOperation(&op)
+		// og := new(opGen)
+		// og.IncludeHandler = o.IncludeHandler
+		// og.IncludeParameters = o.IncludeParameters
+		// og.IncludeResponses = o.IncludeResponses
+		// og.data = &op
+		// og.pkg = op.Package
+		// og.cname = swag.ToGoName(op.Name)
+		// og.Doc = o.Doc
+		// og.Analyzed = o.Analyzed
+		// og.Target = o.Target
+		// og.APIPackage = o.APIPackage
+		// og.WithContext = o.WithContext
+		// return og.Generate()
 	}
 
 	return nil
 }
 
-type opGen struct {
-	data              *GenOperation
-	pkg               string
-	cname             string
-	IncludeHandler    bool
-	IncludeParameters bool
-	IncludeResponses  bool
-	Doc               *loads.Document
-	Analyzed          *analysis.Spec
-	Target            string
-	APIPackage        string
-	WithContext       bool
-}
+// type opGen struct {
+// 	data              *GenOperation
+// 	pkg               string
+// 	cname             string
+// 	IncludeHandler    bool
+// 	IncludeParameters bool
+// 	IncludeResponses  bool
+// 	Doc               *loads.Document
+// 	Analyzed          *analysis.Spec
+// 	Target            string
+// 	APIPackage        string
+// 	GenOpts           *GenOpts
+// 	WithContext       bool
+// }
 
-func (o *opGen) Generate() error {
+// func (o *opGen) Generate() error {
 
-	if o.IncludeHandler {
-		if err := o.generateHandler(); err != nil {
-			return fmt.Errorf("handler: %s", err)
-		}
-		log.Println("generated handler", o.data.Package+"."+o.cname)
-	}
+// 	if o.IncludeHandler {
+// 		if err := o.generateHandler(); err != nil {
+// 			return fmt.Errorf("handler: %s", err)
+// 		}
+// 		log.Println("generated handler", o.data.Package+"."+o.cname)
+// 	}
 
-	opParams := o.Analyzed.ParamsFor(o.data.Method, o.data.Path)
-	if o.IncludeParameters {
-		if err := o.generateParameterModel(); err != nil {
-			return fmt.Errorf("parameters: %s", err)
-		}
-		log.Println("generated parameters", o.data.Package+"."+o.cname+"Parameters")
-	}
+// 	opParams := o.Analyzed.ParamsFor(o.data.Method, o.data.Path)
+// 	if o.IncludeParameters {
+// 		if err := o.generateParameterModel(); err != nil {
+// 			return fmt.Errorf("parameters: %s", err)
+// 		}
+// 		log.Println("generated parameters", o.data.Package+"."+o.cname+"Parameters")
+// 	}
 
-	if o.IncludeResponses {
-		if err := o.generateResponses(); err != nil {
-			return fmt.Errorf("responses: %s", err)
-		}
-		log.Println("generated responses", o.data.Package+"."+o.cname+"Responses")
-	}
+// 	if o.IncludeResponses {
+// 		if err := o.generateResponses(); err != nil {
+// 			return fmt.Errorf("responses: %s", err)
+// 		}
+// 		log.Println("generated responses", o.data.Package+"."+o.cname+"Responses")
+// 	}
 
-	if len(opParams) == 0 {
-		log.Println("no parameters for operation", o.data.Package+"."+o.cname)
-	}
-	return nil
-}
+// 	if len(opParams) == 0 {
+// 		log.Println("no parameters for operation", o.data.Package+"."+o.cname)
+// 	}
+// 	return nil
+// }
 
-func (o *opGen) generateHandler() error {
-	buf := bytes.NewBuffer(nil)
+// func (o *opGen) generateHandler() error {
+// 	buf := bytes.NewBuffer(nil)
 
-	if err := operationTemplate.Execute(buf, o.data); err != nil {
-		return err
-	}
-	log.Println("rendered handler template:", o.pkg+"."+o.cname)
+// 	if err := operationTemplate.Execute(buf, o.data); err != nil {
+// 		return err
+// 	}
+// 	log.Println("rendered handler template:", o.pkg+"."+o.cname)
 
-	fp := filepath.Join(o.Target, o.pkg)
-	if o.pkg != o.APIPackage {
-		fp = filepath.Join(o.Target, o.APIPackage, o.pkg)
-	}
-	return writeToFile(fp, swag.ToGoName(o.data.Name), buf.Bytes())
-}
+// 	fp := filepath.Join(o.Target, o.pkg)
+// 	if o.pkg != o.APIPackage {
+// 		fp = filepath.Join(o.Target, o.APIPackage, o.pkg)
+// 	}
+// 	return writeToFile(fp, swag.ToGoName(o.data.Name), buf.Bytes())
+// }
 
-func (o *opGen) generateParameterModel() error {
-	buf := bytes.NewBuffer(nil)
+// func (o *opGen) generateParameterModel() error {
+// 	buf := bytes.NewBuffer(nil)
 
-	if err := parameterTemplate.Execute(buf, o.data); err != nil {
-		return err
-	}
-	log.Println("rendered parameters template:", o.pkg+"."+o.cname+"Parameters")
+// 	if err := parameterTemplate.Execute(buf, o.data); err != nil {
+// 		return err
+// 	}
+// 	log.Println("rendered parameters template:", o.pkg+"."+o.cname+"Parameters")
 
-	fp := filepath.Join(o.Target, o.pkg)
-	if o.pkg != o.APIPackage {
-		fp = filepath.Join(o.Target, o.APIPackage, o.pkg)
-	}
-	return writeToFile(fp, swag.ToGoName(o.data.Name)+"Parameters", buf.Bytes())
-}
+// 	fp := filepath.Join(o.Target, o.pkg)
+// 	if o.pkg != o.APIPackage {
+// 		fp = filepath.Join(o.Target, o.APIPackage, o.pkg)
+// 	}
+// 	return writeToFile(fp, swag.ToGoName(o.data.Name)+"Parameters", buf.Bytes())
+// }
 
-func (o *opGen) generateResponses() error {
-	buf := bytes.NewBuffer(nil)
+// func (o *opGen) generateResponses() error {
+// 	buf := bytes.NewBuffer(nil)
 
-	if err := responsesTemplate.Execute(buf, o.data); err != nil {
-		return err
-	}
-	log.Println("rendered responses template:", o.pkg+"."+o.cname+"Responses")
+// 	if err := responsesTemplate.Execute(buf, o.data); err != nil {
+// 		return err
+// 	}
+// 	log.Println("rendered responses template:", o.pkg+"."+o.cname+"Responses")
 
-	fp := filepath.Join(o.Target, o.pkg)
-	if o.pkg != o.APIPackage {
-		fp = filepath.Join(o.Target, o.APIPackage, o.pkg)
-	}
-	return writeToFile(fp, swag.ToGoName(o.data.Name)+"Responses", buf.Bytes())
-}
+// 	fp := filepath.Join(o.Target, o.pkg)
+// 	if o.pkg != o.APIPackage {
+// 		fp = filepath.Join(o.Target, o.APIPackage, o.pkg)
+// 	}
+// 	return writeToFile(fp, swag.ToGoName(o.data.Name)+"Responses", buf.Bytes())
+// }
 
 type codeGenOpBuilder struct {
 	Name            string
@@ -320,6 +320,7 @@ type codeGenOpBuilder struct {
 	DefaultConsumes string
 	ExtraSchemas    map[string]GenSchema
 	origDefs        map[string]spec.Schema
+	GenOpts         *GenOpts
 }
 
 func (b *codeGenOpBuilder) MakeOperation() (GenOperation, error) {

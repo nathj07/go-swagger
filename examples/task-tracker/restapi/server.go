@@ -143,7 +143,7 @@ func (s *Server) Serve() (err error) {
 			if err := domainSocket.Serve(l); err != nil {
 				s.Fatalf("%v", err)
 			}
-			s.Logf("stopped serving todo list at unix://%s", s.SocketPath)
+			s.Logf("Stopped serving task tracker at unix://%s", s.SocketPath)
 		}(s.domainSocketL)
 	}
 
@@ -160,7 +160,7 @@ func (s *Server) Serve() (err error) {
 			if err := httpServer.Serve(l); err != nil {
 				s.Fatalf("%v", err)
 			}
-			s.Logf("stopped serving todo list at http://%s", l.Addr())
+			s.Logf("Stopped serving task tracker at http://%s", l.Addr())
 		}(s.httpServerL)
 	}
 
@@ -190,7 +190,7 @@ func (s *Server) Serve() (err error) {
 			if err := httpsServer.Serve(l); err != nil {
 				s.Fatalf("%v", err)
 			}
-			s.Logf("stopped serving todo list at https://%s", l.Addr())
+			s.Logf("Stopped serving task tracker at https://%s", l.Addr())
 		}(tls.NewListener(s.httpsServerL, httpsServer.TLSConfig))
 	}
 
